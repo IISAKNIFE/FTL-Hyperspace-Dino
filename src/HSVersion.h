@@ -16,12 +16,24 @@ Change the version numbers here
 #include <boost/algorithm/string.hpp>
 #include <boost/format.hpp>
 
-#ifdef __linux__
+#ifdef HS_IPAD_SWITCH
+    #define BUILD_TGT " Switch"
+#elif defined(HS_IPAD_LINUX)
+    #define BUILD_TGT " aarch64 Linux"
+#elif defined(HS_IPAD_MACOS)
+    #define BUILD_TGT " aarch64 macOS"
+#elif defined(HS_IPAD_IOS)
+    #define BUILD_TGT " aarch64 iOS"
+#elif defined(__ANDROID__)
+    #define BUILD_TGT " aarch64 Android"
+#elif defined(__linux__)
     #ifdef __i386__
         #define BUILD_TGT " x86"
     #else
         #define BUILD_TGT " x64"
     #endif // __arch
+#elif defined(__APPLE__)
+    #define BUILD_TGT " amd64 macOS"
 #else
 #define BUILD_TGT ""
 #endif // __linux__

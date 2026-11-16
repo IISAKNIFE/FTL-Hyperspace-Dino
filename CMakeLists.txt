@@ -9,11 +9,34 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # Rules for generated/: hook definitions, swig runtime, version header
 include(GeneratedSources)
 
+# FTL for iPad, run by ftl-android, ftl-linux or ftl.nro (Switch, static library without vcpkg)
+option(HS_IPAD_LINUX "Build for FTL for iPad run by ftl-linux on aarch64 Linux" OFF)
+option(HS_IPAD_SWITCH "Build for FTL for iPad run by ftl.nro on the Switch (static library)" OFF)
+option(HS_IPAD_MACOS "Build for FTL for iPad run as a Mac Catalyst app on Apple Silicon (iOS-FTL-for-macOS)" OFF)
+option(HS_IPAD_IOS "Build for FTL for iPad on iOS itself, a device or the simulator" OFF)
+set(HS_DEPS "" CACHE PATH "Switch: include/ and lib/ with Boost headers, Lua 5.3, minizip and zlib")
+if(ANDROID OR HS_IPAD_LINUX OR HS_IPAD_SWITCH OR HS_IPAD_MACOS OR HS_IPAD_IOS)
+    set(HS_IPAD_PORT ON)
+else()
+    set(HS_IPAD_PORT OFF)
+endif()
+
 if(APPLE)
     # Prefer static libraries for dependencies on macOS
     set(BUILD_SHARED_LIBS OFF)
 endif()
 
+if(HS_IPAD_SWITCH)
+    # Only Boost's header-only parts are used (filesystem is for the crash reporter, left out)
+    set(Boost_INCLUDE_DIRS "${HS_DEPS}/include")
+    set(LUA_INCLUDE_DIR "${HS_DEPS}/include")
+    set(LUA_LIBRARIES "${HS_DEPS}/lib/liblua.a")
+    add_library(minizip::minizip INTERFACE IMPORTED)
+    set_target_properties(minizip::minizip PROPERTIES INTERFACE_INCLUDE_DIRECTORIES "${HS_DEPS}/include")
+    add_library(ZLIB::ZLIB INTERFACE IMPORTED)
+    add_library(Boost::filesystem INTERFACE IMPORTED)
+    add_library(Threads::Threads INTERFACE IMPORTED)
+else()
 # Let vcpkg handle Boost automatically
 find_package(Boost REQUIRED COMPONENTS filesystem system)
 
@@ -23,17 +46,27 @@ find_package(Lua REQUIRED)
 # Let vcpkg handle minizip automatically
 find_package(minizip REQUIRED)
 find_package(ZLIB REQUIRED)
+endif()
 
-# Let vcpkg handle SDL3 automatically
-find_package(SDL3 CONFIG REQUIRED)
+# SDL3: vcpkg's. On aarch64 Linux the system's, which ftl-linux runs on too, so the game
+# and Hyperspace share one SDL. On the Switch the libnx build in HS_DEPS
+# (buildscripts/switch/sdl3.sh); ftl.nro links it with Hyperspace.
+if(HS_IPAD_SWITCH)
+    add_library(SDL3::SDL3 INTERFACE IMPORTED)
+    set_target_properties(SDL3::SDL3 PROPERTIES INTERFACE_INCLUDE_DIRECTORIES "${HS_DEPS}/include")
+else()
+    find_package(SDL3 CONFIG REQUIRED)
+endif()
 
 if(WIN32)
     find_package(OpenGL REQUIRED)
 endif()
 
-# pthread
-set(THREADS_PREFER_PTHREAD_FLAG ON)
-find_package(Threads REQUIRED)
+# pthread (newlib's on the Switch, given above)
+if(NOT HS_IPAD_SWITCH)
+    set(THREADS_PREFER_PTHREAD_FLAG ON)
+    find_package(Threads REQUIRED)
+endif()
 
 # SWIG
 find_package(SWIG REQUIRED COMPONENTS lua)
@@ -49,13 +82,21 @@ set(
 )
 set_property(SOURCE ${swigfiles} PROPERTY USE_TARGET_INCLUDE_DIRECTORIES TRUE)
 set_property(SOURCE ${swigfiles} PROPERTY CPLUSPLUS ON)
+if(HS_IPAD_PORT)
+    set_property(SOURCE ${swigfiles} APPEND PROPERTY COMPILE_DEFINITIONS HS_ANDROID)
+endif()
 
 # Name the binary as Hyperspace.dll instead of libHyperspace.dll
 set(CMAKE_SHARED_LIBRARY_PREFIX_CXX "")
 
+if(HS_IPAD_SWITCH)
+    set(HS_LIBRARY_TYPE STATIC)  # linked into ftl.nro: Horizon has no dynamic loader
+else()
+    set(HS_LIBRARY_TYPE SHARED)
+endif()
 swig_add_library(
     Hyperspace
-    TYPE SHARED
+    TYPE ${HS_LIBRARY_TYPE}
     LANGUAGE lua
     SOURCES ${swigfiles}
 )
@@ -106,8 +147,8 @@ target_link_libraries(
     ZLIB::ZLIB
     Boost::filesystem
     Threads::Threads
-    SDL3::SDL3
 )
+target_link_libraries(Hyperspace PRIVATE SDL3::SDL3)
 
 # Sources belong in src/
 file(GLOB ROOT_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/*.cpp" "${CMAKE_CURRENT_SOURCE_DIR}/*.h")
@@ -123,6 +164,11 @@ file(GLOB_RECURSE HS_SOURCES CONFIGURE_DEPENDS
 
 # Placed explicitly below
 list(FILTER HS_SOURCES EXCLUDE REGEX "/src/(zhl/|main\\.cpp$)")
+if(HS_IPAD_PORT)
+    list(FILTER HS_SOURCES EXCLUDE REGEX "/src/features/crash-detection/")
+else()
+    list(FILTER HS_SOURCES EXCLUDE REGEX "/src/android/")
+endif()
 
 # Hooking engine
 file(GLOB ZHL_SOURCES CONFIGURE_DEPENDS
@@ -133,6 +179,8 @@ file(GLOB ZHL_SOURCES CONFIGURE_DEPENDS
 # Generated hook definitions for this platform
 if(WIN32)
     set(FTLGAME_PLATFORM Win32)
+elseif(HS_IPAD_PORT)
+    set(FTLGAME_PLATFORM iOSARM64)
 elseif(APPLE)
     set(FTLGAME_PLATFORM MacOSAMD64)
 elseif(CMAKE_SIZEOF_VOID_P EQUAL 8)
@@ -179,9 +227,6 @@ target_sources(
     # all lua files
     ${LUA_SOURCES}
 
-    # Vendored sources
-    third_party/detours/hde.cpp
-
     # Generated files
     ${HS_SWIG_RUNTIME}
     ${CMAKE_CURRENT_SOURCE_DIR}/generated/Version.autogen.hpp
@@ -192,11 +237,16 @@ target_sources(
     src/main.cpp
 )
 
-target_compile_options(
-    Hyperspace PRIVATE
+if(NOT HS_IPAD_PORT)
+    # Vendored sources
+    target_sources(Hyperspace PRIVATE third_party/detours/hde.cpp)
 
     # Enable SSE2
-    -msse -msse2 -mfpmath=sse
+    target_compile_options(Hyperspace PRIVATE -msse -msse2 -mfpmath=sse)
+endif()
+
+target_compile_options(
+    Hyperspace PRIVATE
 
     # Error on narrowing conversion
     -Werror=narrowing
@@ -218,7 +268,35 @@ if(APPLE)
 endif()
 
 target_compile_definitions(Hyperspace PRIVATE _REENTRANT)
-if(UNIX)
+if(HS_IPAD_PORT)
+    set_target_properties(Hyperspace PROPERTIES PREFIX "lib" OUTPUT_NAME "Hyperspace")
+    # Not every file that checks these includes PALPlatform.h
+    target_compile_definitions(Hyperspace PRIVATE HS_ANDROID=1 HS_APPLE_GAME=1)
+    if(ANDROID)
+        target_link_libraries(Hyperspace PRIVATE log)
+    elseif(HS_IPAD_SWITCH)
+        target_compile_definitions(Hyperspace PRIVATE HS_IPAD_SWITCH=1)
+    elseif(HS_IPAD_MACOS)
+        target_compile_definitions(Hyperspace PRIVATE HS_IPAD_MACOS=1)
+    elseif(HS_IPAD_IOS)
+        target_compile_definitions(Hyperspace PRIVATE HS_IPAD_IOS=1)
+    else()
+        target_compile_definitions(Hyperspace PRIVATE HS_IPAD_LINUX=1)
+    endif()
+    if(HS_IPAD_MACOS OR HS_IPAD_IOS)
+        # The game is a real Mach-O image under dyld, so the system's libc++ and unwinder
+        # serve it as they are. Export only the host interface.
+        set_target_properties(Hyperspace PROPERTIES PREFIX "" OUTPUT_NAME "Hyperspace.1.6.21.arm64")
+        target_link_options(Hyperspace PRIVATE "-Wl,-exported_symbol,_hs_android_*")
+    else()
+        target_link_options(Hyperspace PRIVATE
+            # Use the port's libunwind
+            -unwindlib=none "${FTL_LIBCXX}/lib/libunwind.a"
+            # Keep static library symbols private
+            -Wl,--exclude-libs,ALL
+        )
+    endif()
+elseif(UNIX)
     if (APPLE)
         # SDL3 loads OpenGL dynamically on macOS. 
         target_link_libraries(Hyperspace PRIVATE "-framework OpenGL")

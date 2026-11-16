@@ -1,0 +1,69 @@
+name: 'Build iOS'
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: 'Build type'
+        type: choice
+        options: [Release, Debug]
+        default: Release
+      build_simulator:
+        description: 'Also build the iOS Simulator dylib'
+        type: boolean
+        default: false
+      build_macos:
+        description: 'Also build the macOS (iPad app on Apple Silicon) dylib from the same commit'
+        type: boolean
+        default: false
+
+jobs:
+  build-ios:
+    # Apple Silicon runner: the iOS build uses arm64-osx as the vcpkg host triplet
+    runs-on: macos-15
+    env:
+      BUILD_TYPE: ${{ inputs.build_type || 'Release' }}
+      HS_BUILD_BRANCH: ${{ github.head_ref || github.ref_name }}
+      HS_BUILD_HASH: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # vcpkg's default binary cache on macOS; saves rebuilding boost/sdl3/lua every run
+      - name: Cache vcpkg binaries
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/vcpkg/archives
+          key: vcpkg-ios-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('vcpkg.json', '.devcontainer/toolchains/arm64-ios-ftl.cmake', '.devcontainer/triplets/*ios*') }}
+          restore-keys: |
+            vcpkg-ios-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Setup iOS build environment
+        run: buildscripts/ios/setup.sh
+
+      - name: Build iOS device dylib
+        run: buildscripts/ios/build.sh device "$BUILD_TYPE"
+
+      - name: Build iOS Simulator dylib
+        if: ${{ inputs.build_simulator }}
+        run: buildscripts/ios/build.sh simulator "$BUILD_TYPE"
+
+      # FTL-iOS-Patcher records the hooks from the macOS build of the same commit
+      - name: Build macOS dylib
+        if: ${{ inputs.build_macos }}
+        run: |
+          buildscripts/macos/setup.sh
+          buildscripts/macos/build.sh "$BUILD_TYPE"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: hyperspace-ios-binaries
+          path: |
+            build-ios-*/Hyperspace.*.dylib
+            build-macos-*/Hyperspace.*.dylib
+          if-no-files-found: error
